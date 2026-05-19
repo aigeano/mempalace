@@ -21,21 +21,25 @@ def _patch_mcp_server(monkeypatch, config, kg):
     monkeypatch.setattr(mcp_server, "_kg", kg)
 
 
-def _get_collection(palace_path, create=False):
-    """Helper to get collection from test palace.
+def _ensure_collection(palace_path):
+    """Ensure a SQLite collection exists in the test palace.
 
-    Returns (client, collection) so callers can clean up the client
-    when they are done.
+    Creates the mempalace.db if it doesn't exist, which is needed for
+    tests that don't use the seeded_collection fixture (e.g. add_drawer).
     """
-    import chromadb
+    from mempalace.backends.base import PalaceRef
+    from mempalace.backends.sqlite_backend import SqliteBackend
+    from mempalace.embedding import get_embedding_function
 
-    client = chromadb.PersistentClient(path=palace_path)
-    if create:
-        return (
-            client,
-            client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"}),
-        )
-    return client, client.get_collection("mempalace_drawers")
+    backend = SqliteBackend()
+    palace = PalaceRef(id=palace_path, local_path=palace_path)
+    col = backend.get_collection(
+        palace=palace,
+        collection_name="mempalace_drawers",
+        create=True,
+        options={"embed_fn": get_embedding_function()},
+    )
+    return col
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────
@@ -122,8 +126,7 @@ class TestHandleRequest:
         _patch_mcp_server(monkeypatch, config, seeded_kg)
         from mempalace.mcp_server import handle_request
 
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         resp = handle_request(
             {
                 "method": "tools/call",
@@ -193,8 +196,7 @@ class TestHandleRequest:
         from mempalace.mcp_server import handle_request
 
         # Create a collection so status works
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
 
         resp = handle_request(
             {
@@ -213,18 +215,13 @@ class TestHandleRequest:
 
 class TestReadTools:
     def test_status_cold_start_no_collection(self, monkeypatch, config, palace_path, kg):
-        """Status on a valid palace with no ChromaDB collection yet (#830).
+        """Status on a valid palace with empty DB (no drawers yet).
 
-        After `mempalace init`, chroma.sqlite3 exists but the mempalace_drawers
-        collection has not been created (no mine or add_drawer yet).  Status
-        should return total_drawers: 0, not 'No palace found'.
+        After `mempalace init`, mempalace.db exists but no drawers have
+        been added.  Status should return total_drawers: 0, not 'No palace found'.
         """
-        import chromadb
-
         _patch_mcp_server(monkeypatch, config, kg)
-        # Create the DB file (init does this) but NOT the collection
-        client = chromadb.PersistentClient(path=palace_path)
-        del client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_status
 
         result = tool_status()
@@ -233,8 +230,7 @@ class TestReadTools:
 
     def test_status_empty_palace(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_status
 
         result = tool_status()
@@ -429,8 +425,7 @@ class TestSearchTool:
 class TestWriteTools:
     def test_add_drawer(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_add_drawer
 
         result = tool_add_drawer(
@@ -445,8 +440,7 @@ class TestWriteTools:
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_add_drawer
 
         content = "This is a unique test memory about Rust ownership and borrowing."
@@ -460,8 +454,7 @@ class TestWriteTools:
     def test_add_drawer_shared_header_no_collision(self, monkeypatch, config, palace_path, kg):
         """Documents sharing a >100-char header must get distinct IDs (full-content hash)."""
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_add_drawer
 
         header = "# ACME Corp Knowledge Base\n**Project:** Alpha | **Team:** Backend | **Status:** Active\n\n"
@@ -513,25 +506,6 @@ class TestWriteTools:
             threshold=0.99,
         )
         assert result["is_duplicate"] is False
-
-    def test_check_duplicate_short_circuits_when_vector_disabled(self, monkeypatch):
-        from mempalace import mcp_server
-
-        monkeypatch.setattr(
-            mcp_server,
-            "hnsw_capacity_status",
-            lambda *_args, **_kwargs: {"diverged": True, "message": "capacity mismatch"},
-        )
-
-        def fail_get_collection():
-            raise AssertionError("_get_collection must not run when vector search is disabled")
-
-        monkeypatch.setattr(mcp_server, "_get_collection", fail_get_collection)
-        result = mcp_server.tool_check_duplicate("content")
-
-        assert result["is_duplicate"] is False
-        assert result["vector_disabled"] is True
-        assert result["vector_disabled_reason"] == "capacity mismatch"
 
     def test_get_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -691,8 +665,7 @@ class TestKGTools:
 class TestDiaryTools:
     def test_diary_write_and_read(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_diary_write, tool_diary_read
 
         w = tool_diary_write(
@@ -710,8 +683,7 @@ class TestDiaryTools:
 
     def test_diary_read_empty(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_diary_read
 
         r = tool_diary_read(agent_name="Nobody")
@@ -721,8 +693,7 @@ class TestDiaryTools:
         self, monkeypatch, config, palace_path, kg
     ):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
 
         from mempalace import mcp_server
 
@@ -764,8 +735,7 @@ class TestDiaryTools:
         wrote to. Hooks write to project-derived wings (#659); a reader that
         silos by default wing would never see those entries."""
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace.mcp_server import tool_diary_read, tool_diary_write
 
         w1 = tool_diary_write(
@@ -798,83 +768,13 @@ class TestDiaryTools:
 
 
 class TestCacheInvalidation:
-    """Tests for _get_collection inode/mtime cache invalidation logic."""
-
-    def test_mtime_change_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When mtime changes, the cached collection should be replaced."""
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace import mcp_server
-
-        # Create a real collection so _get_collection succeeds
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-
-        # Prime the cache
-        col1 = mcp_server._get_collection()
-        assert col1 is not None
-
-        # Simulate an external write changing the mtime
-        old_mtime = mcp_server._palace_db_mtime
-        monkeypatch.setattr(mcp_server, "_palace_db_mtime", old_mtime - 10.0)
-
-        # _get_collection should detect the mtime drift and reconnect
-        col2 = mcp_server._get_collection()
-        assert col2 is not None
-
-    def test_inode_change_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When inode changes (file replaced), the cached collection should be replaced."""
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace import mcp_server
-
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-
-        # Prime the cache
-        col1 = mcp_server._get_collection()
-        assert col1 is not None
-
-        # Simulate a rebuild that changes the inode
-        monkeypatch.setattr(mcp_server, "_palace_db_inode", 99999)
-
-        col2 = mcp_server._get_collection()
-        assert col2 is not None
-
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="Windows holds chroma.sqlite3 open while the client is cached, blocking os.remove",
-    )
-    def test_missing_db_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When chroma.sqlite3 disappears, a cached collection should be invalidated."""
-        _patch_mcp_server(monkeypatch, config, kg)
-        import os
-        from mempalace import mcp_server
-
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-
-        # Prime the cache
-        col1 = mcp_server._get_collection()
-        assert col1 is not None
-        assert mcp_server._collection_cache is not None
-
-        # Delete the DB file to simulate a rebuild in progress
-        db_file = os.path.join(palace_path, "chroma.sqlite3")
-        if os.path.isfile(db_file):
-            os.remove(db_file)
-
-        # Cache should be invalidated; _get_collection returns None
-        # because the backend can't open a missing DB without create=True
-        mcp_server._get_collection()
-        # The key assertion: the old cached collection was dropped
-        assert mcp_server._palace_db_inode == 0
-        assert mcp_server._palace_db_mtime == 0.0
+    """Tests for collection cache and reconnect behavior."""
 
     def test_reconnect_reports_failure_when_no_palace(self, monkeypatch, config, kg):
         """tool_reconnect should report failure when no collection is available."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server
 
-        # Make _get_collection always return None
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: None)
 
         result = mcp_server.tool_reconnect()
@@ -885,8 +785,7 @@ class TestCacheInvalidation:
     def test_reconnect_reports_success(self, monkeypatch, config, palace_path, kg):
         """tool_reconnect should report success with drawer count."""
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        _ensure_collection(palace_path)
         from mempalace import mcp_server
 
         result = mcp_server.tool_reconnect()
@@ -894,47 +793,23 @@ class TestCacheInvalidation:
         assert "Reconnected" in result["message"]
         assert isinstance(result["drawers"], int)
 
-    def test_get_collection_create_true_avoids_get_or_create_on_reopen(
-        self, monkeypatch, config, palace_path, kg
-    ):
-        """Regression for the MCP-server half of #1262.
-
-        ChromaDB 1.5.x's Rust bindings SIGSEGV when
-        ``client.get_or_create_collection`` is called with metadata that
-        differs from the collection's stored metadata. The Stop hook
-        path (``tool_diary_write`` -> ``_get_collection(create=True)``)
-        was reaching that codepath on every session-end; #1262 fixed
-        the equivalent crash class in ``ChromaBackend`` but left this
-        site untouched. ``_get_collection(create=True)`` must call
-        ``client.get_collection`` first and only fall back to
-        ``client.create_collection`` when the collection does not yet
-        exist on disk.
-        """
+    def test_collection_cache_returns_same_instance(self, monkeypatch, config, palace_path, kg):
+        """_get_collection should return the cached instance on repeat calls."""
         _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
         from mempalace import mcp_server
 
-        col1 = mcp_server._get_collection(create=True)
+        col1 = mcp_server._get_collection()
+        col2 = mcp_server._get_collection()
+        assert col1 is col2
+
+    def test_reconnect_clears_cache(self, monkeypatch, config, palace_path, kg):
+        """tool_reconnect should clear the collection cache."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+
+        col1 = mcp_server._get_collection()
         assert col1 is not None
-
-        client = mcp_server._client_cache
-        assert client is not None
-
-        # Patch at the class level — chromadb's mtime-change detection
-        # may rebuild the client between calls, so an instance-level
-        # spy would not survive.
-        client_cls = type(client)
-        calls: list[tuple] = []
-
-        def _spy(self, *args, **kwargs):
-            calls.append((args, kwargs))
-            raise AssertionError(
-                "get_or_create_collection must not be called on reopen "
-                "(SIGSEGV path on metadata mismatch)"
-            )
-
-        monkeypatch.setattr(client_cls, "get_or_create_collection", _spy)
-        mcp_server._collection_cache = None
-
-        col2 = mcp_server._get_collection(create=True)
-        assert col2 is not None
-        assert calls == [], f"get_or_create_collection was called: {calls}"
+        mcp_server.tool_reconnect()
+        assert mcp_server._collection_cache is None or mcp_server._collection_cache is not col1

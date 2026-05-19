@@ -1,8 +1,7 @@
-"""Tier 1 unit tests for the SQLite + NumPy storage backend.
+"""Unit tests for the SQLite + NumPy storage backend.
 
-Tests are written before the implementation (TDD). All 25 tests must pass
-before Phase 1 is accepted. Each test targets a single behavior documented
-in plan 005-mempalace-sqlite-rebuild.md.
+Each test targets a single behavior of the SqliteBackend / SqliteCollection
+implementation.
 """
 
 import json

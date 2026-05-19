@@ -27,28 +27,27 @@ os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 
 # Now it is safe to import mempalace modules that trigger initialisation.
-import chromadb  # noqa: E402
 import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+from mempalace.backends.base import PalaceRef  # noqa: E402
+from mempalace.backends.sqlite_backend import SqliteBackend  # noqa: E402
+from mempalace.embedding import get_embedding_function  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset the MCP server's cached collection between tests."""
 
     def _clear_cache():
         try:
             from mempalace import mcp_server
 
-            mcp_server._client_cache = None
             mcp_server._collection_cache = None
         except (ImportError, AttributeError):
             pass
         try:
-            # Reset the per-process quarantine gate so tests don't leak
-            # state through ChromaBackend._quarantined_paths.
             from mempalace.backends.chroma import ChromaBackend
 
             ChromaBackend._quarantined_paths.clear()
@@ -105,14 +104,29 @@ def config(tmp_dir, palace_path):
     return MempalaceConfig(config_dir=cfg_dir)
 
 
+_test_embed_fn = None
+
+
+def _get_test_embed_fn():
+    global _test_embed_fn
+    if _test_embed_fn is None:
+        _test_embed_fn = get_embedding_function()
+    return _test_embed_fn
+
+
 @pytest.fixture
 def collection(palace_path):
-    """A ChromaDB collection pre-seeded in the temp palace."""
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    """A SqliteCollection in the temp palace."""
+    backend = SqliteBackend()
+    palace = PalaceRef(id=palace_path, local_path=palace_path)
+    col = backend.get_collection(
+        palace=palace,
+        collection_name="mempalace_drawers",
+        create=True,
+        options={"embed_fn": _get_test_embed_fn()},
+    )
     yield col
-    client.delete_collection("mempalace_drawers")
-    del client
+    backend.close()
 
 
 @pytest.fixture

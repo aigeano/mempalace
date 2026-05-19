@@ -3,10 +3,32 @@ import tempfile
 import shutil
 from pathlib import Path
 
-import chromadb
-
+from mempalace.backends.base import PalaceRef
+from mempalace.backends.sqlite_backend import SqliteBackend
 from mempalace.convo_miner import mine_convos
+from mempalace.embedding import get_embedding_function
 from mempalace.palace import file_already_mined
+
+_test_embed_fn = None
+
+
+def _get_test_embed_fn():
+    global _test_embed_fn
+    if _test_embed_fn is None:
+        _test_embed_fn = get_embedding_function()
+    return _test_embed_fn
+
+
+def _open_palace_collection(palace_path, collection_name="mempalace_drawers"):
+    """Open a palace collection via the SQLite backend."""
+    backend = SqliteBackend()
+    palace = PalaceRef(id=str(palace_path), local_path=str(palace_path))
+    return backend.get_collection(
+        palace=palace,
+        collection_name=collection_name,
+        create=False,
+        options={"embed_fn": _get_test_embed_fn()},
+    )
 
 
 def test_convo_mining():
@@ -19,8 +41,7 @@ def test_convo_mining():
     palace_path = os.path.join(tmpdir, "palace")
     mine_convos(tmpdir, palace_path, wing="test_convos")
 
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection("mempalace_drawers")
+    col = _open_palace_collection(palace_path)
     assert col.count() >= 2
 
     # Verify search works
@@ -46,8 +67,7 @@ def test_mine_convos_does_not_reprocess_short_files(capsys):
 
         # Verify sentinel was written (resolve path -- macOS /var -> /private/var)
         resolved_file = str(Path(tmpdir).resolve() / "tiny.txt")
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = _open_palace_collection(palace_path)
         assert file_already_mined(col, resolved_file)
 
         # Second run -- file should be skipped
@@ -100,8 +120,7 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
         mine_convos(tmpdir, palace_path, wing="test")
         capsys.readouterr()
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = _open_palace_collection(palace_path)
         resolved = str(Path(tmpdir).resolve() / "chat.txt")
         first_pass = col.get(where={"source_file": resolved})
         first_ids = set(first_pass["ids"])
@@ -116,13 +135,13 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
             stale = dict(meta)
             stale["normalize_version"] = 1
             stale_metas.append(stale)
-        col.update(
+        col.upsert(
             ids=list(first_pass["ids"]),
             documents=["STALE NOISE"] * len(first_pass["ids"]),
             metadatas=stale_metas,
         )
         # Add an extra orphan drawer that should also be purged.
-        col.add(
+        col.upsert(
             ids=["orphan_drawer"],
             documents=["OLD ORPHAN"],
             metadatas=[
@@ -135,7 +154,6 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
                 }
             ],
         )
-        del col, client
 
         # Second mine — version gate should trigger rebuild
         mine_convos(tmpdir, palace_path, wing="test")
@@ -144,9 +162,8 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
             "Files skipped (already filed): 0" in out
         ), "stale drawers should force a rebuild, not a skip"
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-        rebuilt = col.get(where={"source_file": resolved})
+        col2 = _open_palace_collection(palace_path)
+        rebuilt = col2.get(where={"source_file": resolved})
         # Orphan is gone
         assert "orphan_drawer" not in rebuilt["ids"]
         # No stale content survived
@@ -155,6 +172,5 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
         # All rebuilt drawers carry the current version
         for meta in rebuilt["metadatas"]:
             assert meta.get("normalize_version") == NORMALIZE_VERSION
-        del col, client
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

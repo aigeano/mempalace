@@ -66,6 +66,10 @@ def get_collection(
     create: bool = True,
 ):
     """Get the palace collection through the backend layer."""
+    if not create:
+        db_path = os.path.join(palace_path, "mempalace.db")
+        if not os.path.isfile(db_path):
+            raise FileNotFoundError(f"No palace database at {db_path}")
     palace = PalaceRef(id=palace_path, local_path=palace_path)
     return _DEFAULT_BACKEND.get_collection(
         palace=palace,

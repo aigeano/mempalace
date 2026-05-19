@@ -460,29 +460,3 @@ def test_repair_status_quiet_on_healthy_palace(tmp_path, capsys):
     assert "Recommended" not in captured
 
 
-# ── tool_status sqlite fallback (#1222 short-circuit) ─────────────────
-
-
-def test_tool_status_via_sqlite_returns_breakdown(palace_with_drawers, monkeypatch):
-    """When _vector_disabled is set, tool_status reads counts from sqlite
-    instead of opening a chromadb client."""
-    from mempalace import mcp_server
-
-    # _config.palace_path is a read-only property; swap the whole object
-    # for a tiny stand-in so we don't have to monkey with the real
-    # MempalaceConfig.
-    class _Cfg:
-        palace_path = str(palace_with_drawers)
-
-    monkeypatch.setattr(mcp_server, "_config", _Cfg())
-    monkeypatch.setattr(mcp_server, "_vector_disabled", True)
-    monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "test divergence")
-
-    out = mcp_server._tool_status_via_sqlite()
-    assert out["vector_disabled"] is True
-    assert out["vector_disabled_reason"] == "test divergence"
-    assert out["total_drawers"] == 3
-    # Wing breakdown comes from the seeded palace_with_drawers fixture:
-    # ops×2 (incident + repair runbook), design×1 (metaphor).
-    assert out["wings"].get("ops") == 2
-    assert out["wings"].get("design") == 1

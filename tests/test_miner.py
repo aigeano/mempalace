@@ -4,11 +4,35 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import chromadb
 import yaml
 
+from mempalace.backends.base import PalaceRef
+from mempalace.backends.sqlite_backend import SqliteBackend
+from mempalace.embedding import get_embedding_function
 from mempalace.miner import load_config, mine, scan_project, status
 from mempalace.palace import NORMALIZE_VERSION, file_already_mined
+
+
+_test_embed_fn = None
+
+
+def _get_test_embed_fn():
+    global _test_embed_fn
+    if _test_embed_fn is None:
+        _test_embed_fn = get_embedding_function()
+    return _test_embed_fn
+
+
+def _open_palace_collection(palace_path, collection_name="mempalace_drawers"):
+    """Open a palace collection via the SQLite backend (replaces chromadb.PersistentClient)."""
+    backend = SqliteBackend()
+    palace = PalaceRef(id=str(palace_path), local_path=str(palace_path))
+    return backend.get_collection(
+        palace=palace,
+        collection_name=collection_name,
+        create=False,
+        options={"embed_fn": _get_test_embed_fn()},
+    )
 
 
 def write_file(path: Path, content: str):
@@ -46,8 +70,7 @@ def test_project_mining():
         palace_path = project_root / "palace"
         mine(str(project_root), str(palace_path))
 
-        client = chromadb.PersistentClient(path=str(palace_path))
-        col = client.get_collection("mempalace_drawers")
+        col = _open_palace_collection(palace_path)
         assert col.count() > 0
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -275,9 +298,13 @@ def test_file_already_mined_check_mtime():
     try:
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection(
-            "mempalace_drawers", metadata={"hnsw:space": "cosine"}
+        backend = SqliteBackend()
+        palace = PalaceRef(id=palace_path, local_path=palace_path)
+        col = backend.get_collection(
+            palace=palace,
+            collection_name="mempalace_drawers",
+            create=True,
+            options={"embed_fn": _get_test_embed_fn()},
         )
 
         test_file = os.path.join(tmpdir, "test.txt")
@@ -291,7 +318,7 @@ def test_file_already_mined_check_mtime():
         assert file_already_mined(col, test_file, check_mtime=True) is False
 
         # Add it with mtime + current normalize_version
-        col.add(
+        col.upsert(
             ids=["d1"],
             documents=["hello world"],
             metadatas=[
@@ -319,7 +346,7 @@ def test_file_already_mined_check_mtime():
         assert file_already_mined(col, test_file, check_mtime=True) is False
 
         # Record with no mtime stored should return False for check_mtime
-        col.add(
+        col.upsert(
             ids=["d2"],
             documents=["other"],
             metadatas=[
@@ -331,8 +358,7 @@ def test_file_already_mined_check_mtime():
         )
         assert file_already_mined(col, "/fake/no_mtime.txt", check_mtime=True) is False
     finally:
-        # Release ChromaDB file handles before cleanup (required on Windows)
-        del col, client
+        backend.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -455,11 +481,17 @@ def test_file_already_mined_returns_false_for_stale_normalize_version():
     try:
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+        backend = SqliteBackend()
+        palace = PalaceRef(id=palace_path, local_path=palace_path)
+        col = backend.get_collection(
+            palace=palace,
+            collection_name="mempalace_drawers",
+            create=True,
+            options={"embed_fn": _get_test_embed_fn()},
+        )
 
         # Pre-v2 drawer: no normalize_version field at all
-        col.add(
+        col.upsert(
             ids=["d_old"],
             documents=["old"],
             metadatas=[{"source_file": "/fake/old.jsonl"}],
@@ -467,7 +499,7 @@ def test_file_already_mined_returns_false_for_stale_normalize_version():
         assert file_already_mined(col, "/fake/old.jsonl") is False
 
         # Explicitly older version
-        col.add(
+        col.upsert(
             ids=["d_v1"],
             documents=["v1"],
             metadatas=[{"source_file": "/fake/v1.jsonl", "normalize_version": 1}],
@@ -475,7 +507,7 @@ def test_file_already_mined_returns_false_for_stale_normalize_version():
         assert file_already_mined(col, "/fake/v1.jsonl") is False
 
         # Current version — short-circuits
-        col.add(
+        col.upsert(
             ids=["d_current"],
             documents=["cur"],
             metadatas=[
@@ -487,7 +519,7 @@ def test_file_already_mined_returns_false_for_stale_normalize_version():
         )
         assert file_already_mined(col, "/fake/current.jsonl") is True
     finally:
-        del col, client
+        backend.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -497,8 +529,14 @@ def test_add_drawer_stamps_normalize_version(tmp_path):
 
     palace_path = tmp_path / "palace"
     palace_path.mkdir()
-    client = chromadb.PersistentClient(path=str(palace_path))
-    col = client.get_or_create_collection("mempalace_drawers")
+    backend = SqliteBackend()
+    palace = PalaceRef(id=str(palace_path), local_path=str(palace_path))
+    col = backend.get_collection(
+        palace=palace,
+        collection_name="mempalace_drawers",
+        create=True,
+        options={"embed_fn": _get_test_embed_fn()},
+    )
     try:
         added = add_drawer(
             collection=col,
@@ -514,7 +552,7 @@ def test_add_drawer_stamps_normalize_version(tmp_path):
         meta = stored["metadatas"][0]
         assert meta["normalize_version"] == NORMALIZE_VERSION
     finally:
-        del col, client
+        backend.close()
 
 
 def test_mine_creates_topic_tunnels_for_shared_topics(tmp_path, monkeypatch):

@@ -309,16 +309,17 @@ class VectorIndex:
                 [i for i, id_ in enumerate(self._ids) if id_ not in allowed_ids]
             )
             if len(mask) > 0:
-                scores[mask] = -2.0
+                scores[mask] = -np.inf
 
-        k = min(n, len(scores))
-        if k == 0:
+        valid = np.where(np.isfinite(scores))[0]
+        if len(valid) == 0:
             return []
 
-        top_indices = np.argpartition(scores, -k)[-k:]
-        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        k = min(n, len(valid))
+        top_valid = valid[np.argpartition(scores[valid], -k)[-k:]]
+        top_valid = top_valid[np.argsort(scores[top_valid])[::-1]]
 
-        return [(self._ids[i], float(1.0 - scores[i])) for i in top_indices]
+        return [(self._ids[i], float(1.0 - scores[i])) for i in top_valid]
 
 
 # ---------------------------------------------------------------------------

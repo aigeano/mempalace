@@ -1,87 +1,78 @@
-"""Invariant tests: every ChromaDB collection-creation path must set
-``hnsw:space=cosine``.
+"""Invariant tests: search uses cosine similarity.
 
-Reason: ChromaDB's default HNSW distance is L2 (Euclidean). Under L2,
-the searcher's ``max(0, 1 - distance)`` similarity formula systematically
-floors to 0 because L2 distances on normalized 384-dim vectors routinely
-exceed 1.0 — users then see flat ``Match: 0.0`` across every result and
-have no signal that their palace is broken.
-
-This test file locks the invariant so a future refactor that drops the
-``metadata={"hnsw:space": "cosine"}`` parameter from any creation path
-gets caught at test time rather than silently degrading search quality.
+The SQLite+NumPy backend computes cosine similarity via dot product on
+L2-normalized vectors. These tests verify that the palace module and
+backend produce working collections where semantic search returns
+meaningful similarity scores (not flat zeros).
 """
 
-from mempalace.backends.chroma import ChromaBackend
+from mempalace.backends.base import PalaceRef
+from mempalace.backends.sqlite_backend import SqliteBackend
+from mempalace.embedding import get_embedding_function
 from mempalace.palace import get_collection
 
 
-EXPECTED_METRIC = "cosine"
+_test_embed_fn = None
 
 
-def _assert_cosine(col, where: str) -> None:
-    meta = col.metadata if hasattr(col, "metadata") else col._collection.metadata
-    assert isinstance(meta, dict), f"{where}: expected metadata dict, got {meta!r}"
-    assert meta.get("hnsw:space") == EXPECTED_METRIC, (
-        f"{where}: expected hnsw:space={EXPECTED_METRIC!r}, got {meta!r}. "
-        "A collection without cosine metric will silently break the "
-        "similarity formula used by the searcher."
-    )
+def _get_test_embed_fn():
+    global _test_embed_fn
+    if _test_embed_fn is None:
+        _test_embed_fn = get_embedding_function()
+    return _test_embed_fn
 
 
-def test_legacy_get_or_create_collection_sets_cosine(tmp_path):
-    backend = ChromaBackend()
-    col = backend.get_or_create_collection(str(tmp_path), "mempalace_drawers")
-    _assert_cosine(col, "legacy get_or_create_collection")
-
-
-def test_legacy_create_collection_sets_cosine(tmp_path):
-    backend = ChromaBackend()
-    col = backend.create_collection(str(tmp_path), "mempalace_drawers")
-    _assert_cosine(col, "legacy create_collection")
-
-
-def test_new_get_collection_with_create_sets_cosine(tmp_path):
-    """RFC 001 typed surface — ``get_collection(..., create=True)`` is the
-    path the miner + init flow take. Must also set cosine."""
-    backend = ChromaBackend()
-    col = backend.get_collection(str(tmp_path), "mempalace_drawers", create=True)
-    _assert_cosine(col, "get_collection(create=True)")
-
-
-def test_palace_module_get_collection_sets_cosine(tmp_path):
-    """The public ``mempalace.palace.get_collection`` is what most callers
-    use. Must produce cosine palaces."""
+def test_palace_module_get_collection_returns_searchable(tmp_path):
+    """The public ``mempalace.palace.get_collection`` must produce a
+    collection that supports upsert + query with cosine distances."""
     col = get_collection(str(tmp_path), "mempalace_drawers", create=True)
-    _assert_cosine(col, "palace.get_collection(create=True)")
-
-
-def test_reopening_cosine_palace_preserves_metric(tmp_path):
-    """Opening a previously-created cosine palace (create=False) must
-    still expose the cosine metadata — catches any regression where
-    reopening drops or overwrites metadata."""
-    backend = ChromaBackend()
-    backend.create_collection(str(tmp_path), "mempalace_drawers")
-    # Fresh backend simulates a process restart
-    backend2 = ChromaBackend()
-    col = backend2.get_collection(str(tmp_path), "mempalace_drawers", create=False)
-    _assert_cosine(col, "re-opened palace")
+    col.upsert(
+        ids=["d1"],
+        documents=["the cat sat on the mat"],
+        metadatas=[{"wing": "test", "room": "r1"}],
+    )
+    results = col.query(query_texts=["cat sitting"], n_results=1)
+    assert len(results["ids"][0]) == 1
+    assert results["distances"][0][0] >= 0
 
 
 def test_fresh_palace_via_full_stack_gets_cosine(tmp_path):
-    """End-to-end: build a palace with the public API the way a new user
-    would, confirm the resulting collection uses cosine distance.
-
-    Uses the ``tmp_path`` fixture rather than ``tempfile.TemporaryDirectory``
-    so ChromaDB's persistent SQLite file handles aren't asked to release
-    during the test body — pytest cleans the path at session end, by which
-    point the process is exiting and Windows' file-lock contention is
-    moot. Matches the cleanup strategy used by the rest of this file and
-    the project's 80% Windows coverage note in CLAUDE.md.
-    """
+    """End-to-end: build a palace with the public API, upsert docs, and
+    confirm that similar documents have higher similarity than dissimilar."""
     col = get_collection(str(tmp_path), "mempalace_drawers", create=True)
-    _assert_cosine(col, "full-stack new palace")
+    col.upsert(
+        ids=["d_cat", "d_math"],
+        documents=["the cat sat on the mat", "integral calculus theory"],
+        metadatas=[
+            {"wing": "test", "room": "r1"},
+            {"wing": "test", "room": "r2"},
+        ],
+    )
+    results = col.query(query_texts=["feline sitting"], n_results=2)
+    ids = results["ids"][0]
+    dists = results["distances"][0]
+    cat_idx = ids.index("d_cat")
+    math_idx = ids.index("d_math")
+    assert dists[cat_idx] < dists[math_idx], (
+        "cat doc should be closer to 'feline sitting' than calculus doc"
+    )
 
-    # And the closets collection too
-    closets = get_collection(str(tmp_path), "mempalace_closets", create=True)
-    _assert_cosine(closets, "full-stack new closets")
+
+def test_sqlite_backend_collection_supports_cosine_query(tmp_path):
+    """Direct SqliteBackend collection query returns cosine distances."""
+    backend = SqliteBackend()
+    palace = PalaceRef(id=str(tmp_path), local_path=str(tmp_path))
+    col = backend.get_collection(
+        palace=palace,
+        collection_name="mempalace_drawers",
+        create=True,
+        options={"embed_fn": _get_test_embed_fn()},
+    )
+    col.upsert(
+        ids=["a", "b"],
+        documents=["python programming language", "french cuisine recipes"],
+        metadatas=[{"wing": "w", "room": "r"}] * 2,
+    )
+    results = col.query(query_texts=["coding in python"], n_results=2)
+    assert results["ids"][0][0] == "a"
+    backend.close()

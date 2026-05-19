@@ -28,7 +28,11 @@ from .base import (
     QueryResult,
     UnsupportedFilterError,
 )
-from .chroma import ChromaBackend, ChromaCollection
+try:
+    from .chroma import ChromaBackend, ChromaCollection
+except ImportError:
+    ChromaBackend = None  # type: ignore[assignment,misc]
+    ChromaCollection = None  # type: ignore[assignment,misc]
 from .sqlite_backend import SqliteBackend, SqliteCollection
 from .registry import (
     available_backends,
