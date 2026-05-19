@@ -374,8 +374,33 @@ Check whether a recent palace checkpoint was saved. Returns message count and ti
 
 ### `mempalace_reconnect`
 
-Force a reconnect to the palace database. Use this after external scripts or CLI commands modified the palace directly, which can leave the in-memory HNSW index stale.
+Force a reconnect to the palace database. Use this after external scripts or CLI commands modified the palace directly, which can leave the in-memory vector index stale.
 
 **Parameters:** None
 
-**Returns:** `{ success, palace_path }`
+**Returns:** `{ success, message, drawers }`
+
+### `mempalace_publish_event`
+
+Publish a custom event visible to all other sessions. Use for cross-session coordination: signal decisions, state changes, or requests to other agents working on the same palace.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `event_type` | string | yes | Event type (e.g. `decision_made`, `task_claimed`, `need_review`) |
+| `payload` | string | no | JSON payload with event data (default: `{}`) |
+
+**Returns:** `{ success, event_id, event_type }`
+
+### `mempalace_poll_events`
+
+Poll for events from other sessions since last poll. Each event is delivered at most once per session. The system automatically fires events on writes: `memory_added`, `memory_deleted`, `memory_updated`, `diary_written`, `kg_fact_added`, `kg_fact_invalidated`.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `event_types` | string | no | Comma-separated event types to filter (default: all) |
+
+**Returns:** `{ events, count, session_id }`

@@ -813,3 +813,107 @@ class TestCacheInvalidation:
         assert col1 is not None
         mcp_server.tool_reconnect()
         assert mcp_server._collection_cache is None or mcp_server._collection_cache is not col1
+
+
+# ── Event Bus Tools ──────────────────────────────────────────────────
+
+
+class TestEventBusTools:
+
+    def test_publish_event(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+
+        result = mcp_server.tool_publish_event(
+            event_type="test_event",
+            payload='{"key": "value"}',
+        )
+        assert result["success"] is True
+        assert result["event_type"] == "test_event"
+        assert isinstance(result["event_id"], int)
+
+    def test_publish_event_invalid_json(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+
+        result = mcp_server.tool_publish_event(
+            event_type="test_event",
+            payload="not json",
+        )
+        assert result["success"] is False
+        assert "JSON" in result["error"]
+
+    def test_poll_events_empty(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+
+        result = mcp_server.tool_poll_events()
+        assert result["count"] == 0
+        assert result["events"] == []
+
+    def test_poll_events_cross_session(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+        from mempalace.backends.base import PalaceRef
+
+        palace = PalaceRef(id=palace_path, local_path=palace_path)
+        mcp_server._backend.publish_event(
+            palace=palace,
+            event_type="external_event",
+            payload={"msg": "hello from another session"},
+            session_id="other-session-999",
+        )
+
+        result = mcp_server.tool_poll_events()
+        assert result["count"] == 1
+        assert result["events"][0]["event_type"] == "external_event"
+        assert result["events"][0]["payload"]["msg"] == "hello from another session"
+
+        result2 = mcp_server.tool_poll_events()
+        assert result2["count"] == 0
+
+    def test_add_drawer_fires_event(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+        from mempalace.backends.base import PalaceRef
+
+        monkeypatch.setattr(mcp_server, "_session_id", "writer-session")
+        mcp_server.tool_add_drawer(
+            wing="test", room="notes", content="event bus integration test content"
+        )
+
+        palace = PalaceRef(id=palace_path, local_path=palace_path)
+        events = mcp_server._backend.poll_events(
+            palace=palace,
+            session_id="reader-session",
+            since_id=0,
+        )
+        memory_events = [e for e in events if e["event_type"] == "memory_added"]
+        assert len(memory_events) == 1
+        assert memory_events[0]["payload"]["wing"] == "test"
+        assert memory_events[0]["payload"]["room"] == "notes"
+
+    def test_poll_events_filter_by_type(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _ensure_collection(palace_path)
+        from mempalace import mcp_server
+        from mempalace.backends.base import PalaceRef
+
+        palace = PalaceRef(id=palace_path, local_path=palace_path)
+        mcp_server._backend.publish_event(
+            palace=palace, event_type="memory_added",
+            payload={}, session_id="other",
+        )
+        mcp_server._backend.publish_event(
+            palace=palace, event_type="decision_made",
+            payload={}, session_id="other",
+        )
+
+        result = mcp_server.tool_poll_events(event_types="decision_made")
+        assert result["count"] == 1
+        assert result["events"][0]["event_type"] == "decision_made"

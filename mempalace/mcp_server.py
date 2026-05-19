@@ -110,6 +110,26 @@ _backend = SqliteBackend()
 _collection_cache = None
 _embed_fn = None
 
+_session_id = os.environ.get("CLAUDE_SESSION_ID", str(os.getpid()))
+_last_event_id = 0
+
+
+def _palace_ref():
+    return PalaceRef(id=_config.palace_path, local_path=_config.palace_path)
+
+
+def _publish_event(event_type: str, payload: dict):
+    """Fire-and-forget event publishing. Never raises."""
+    try:
+        _backend.publish_event(
+            palace=_palace_ref(),
+            event_type=event_type,
+            payload=payload,
+            session_id=_session_id,
+        )
+    except Exception:
+        logger.debug("event publish failed for %s", event_type)
+
 
 def _get_embed_fn():
     global _embed_fn
@@ -421,6 +441,16 @@ def tool_search(
         }
     if context:
         result["context_received"] = True
+    try:
+        pending = _backend.poll_events(
+            palace=_palace_ref(),
+            session_id=_session_id,
+            since_id=_last_event_id,
+        )
+        if pending:
+            result["pending_events"] = len(pending)
+    except Exception:
+        pass
     return result
 
 
@@ -615,6 +645,9 @@ def tool_add_drawer(
         )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
+        _publish_event("memory_added", {
+            "drawer_id": drawer_id, "wing": wing, "room": room,
+        })
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -646,6 +679,11 @@ def tool_delete_drawer(drawer_id: str):
         col.delete(ids=[drawer_id])
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
+        _publish_event("memory_deleted", {
+            "drawer_id": drawer_id,
+            "wing": deleted_meta.get("wing", ""),
+            "room": deleted_meta.get("room", ""),
+        })
         return {"success": True, "drawer_id": drawer_id}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -783,6 +821,12 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
         _metadata_cache = None
 
         logger.info(f"Updated drawer: {drawer_id}")
+        _publish_event("memory_updated", {
+            "drawer_id": drawer_id,
+            "wing": new_meta.get("wing", ""),
+            "room": new_meta.get("room", ""),
+            "content_changed": content is not None,
+        })
         return {
             "success": True,
             "drawer_id": drawer_id,
@@ -832,6 +876,9 @@ def tool_kg_add(
     triple_id = _kg.add_triple(
         subject, predicate, object, valid_from=valid_from, source_closet=source_closet
     )
+    _publish_event("kg_fact_added", {
+        "subject": subject, "predicate": predicate, "object": object,
+    })
     return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
 
 
@@ -848,6 +895,9 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
         {"subject": subject, "predicate": predicate, "object": object, "ended": ended},
     )
     _kg.invalidate(subject, predicate, object, ended=ended)
+    _publish_event("kg_fact_invalidated", {
+        "subject": subject, "predicate": predicate, "object": object,
+    })
     return {
         "success": True,
         "fact": f"{subject} → {predicate} → {object}",
@@ -936,6 +986,9 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             ],
         )
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
+        _publish_event("diary_written", {
+            "agent": agent_name, "topic": topic, "wing": wing,
+        })
         return {
             "success": True,
             "entry_id": entry_id,
@@ -1085,6 +1138,69 @@ def tool_memories_filed_away():
             "count": 0,
             "timestamp": None,
         }
+
+
+# ==================== EVENT BUS TOOLS ====================
+
+
+def tool_publish_event(event_type: str, payload: str = "{}"):
+    """Publish a custom event visible to all other sessions.
+
+    Use for cross-session coordination: signal decisions, state changes,
+    or requests to other agents working on the same palace.
+    """
+    try:
+        event_type = sanitize_name(event_type, "event_type")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    try:
+        payload_dict = json.loads(payload) if isinstance(payload, str) else payload
+    except json.JSONDecodeError:
+        return {"success": False, "error": "payload must be valid JSON"}
+
+    try:
+        event_id = _backend.publish_event(
+            palace=_palace_ref(),
+            event_type=event_type,
+            payload=payload_dict,
+            session_id=_session_id,
+        )
+        return {"success": True, "event_id": event_id, "event_type": event_type}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_poll_events(event_types: str = None):
+    """Poll for events published by other sessions since last poll.
+
+    Returns new events not yet consumed by this session. Each event
+    is returned at most once per session (consumed on read).
+
+    Automatic events fired by the system:
+    - memory_added, memory_deleted, memory_updated (drawer changes)
+    - diary_written (agent diary entries)
+    - kg_fact_added, kg_fact_invalidated (knowledge graph changes)
+    """
+    global _last_event_id
+    types_list = None
+    if event_types:
+        types_list = [t.strip() for t in event_types.split(",") if t.strip()]
+    try:
+        events = _backend.poll_events(
+            palace=_palace_ref(),
+            session_id=_session_id,
+            since_id=_last_event_id,
+            event_types=types_list,
+        )
+        if events:
+            _last_event_id = max(e["id"] for e in events)
+        return {
+            "events": events,
+            "count": len(events),
+            "session_id": _session_id,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ==================== SETTINGS TOOLS ====================
@@ -1542,6 +1658,44 @@ TOOLS = {
             "properties": {},
         },
         "handler": tool_reconnect,
+    },
+    "mempalace_publish_event": {
+        "description": (
+            "Publish a custom event visible to all other sessions. Use for cross-session"
+            " coordination: signal decisions, state changes, or requests to other agents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_type": {
+                    "type": "string",
+                    "description": "Event type (e.g. 'decision_made', 'task_claimed', 'need_review')",
+                },
+                "payload": {
+                    "type": "string",
+                    "description": "JSON payload with event data (default: '{}')",
+                },
+            },
+            "required": ["event_type"],
+        },
+        "handler": tool_publish_event,
+    },
+    "mempalace_poll_events": {
+        "description": (
+            "Poll for events from other sessions since last poll. Each event is delivered"
+            " at most once. Automatic events: memory_added, memory_deleted, memory_updated,"
+            " diary_written, kg_fact_added, kg_fact_invalidated."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_types": {
+                    "type": "string",
+                    "description": "Comma-separated event types to filter (optional, default: all)",
+                },
+            },
+        },
+        "handler": tool_poll_events,
     },
 }
 
