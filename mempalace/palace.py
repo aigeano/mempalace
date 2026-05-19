@@ -9,7 +9,9 @@ import hashlib
 import os
 import re
 
-from .backends.chroma import ChromaBackend
+from .backends.base import PalaceRef
+from .backends.sqlite_backend import SqliteBackend
+from .embedding import get_embedding_function
 
 SKIP_DIRS = {
     ".git",
@@ -37,7 +39,15 @@ SKIP_DIRS = {
     "target",
 }
 
-_DEFAULT_BACKEND = ChromaBackend()
+_DEFAULT_BACKEND = SqliteBackend()
+_EMBED_FN = None
+
+
+def _get_embed_fn():
+    global _EMBED_FN
+    if _EMBED_FN is None:
+        _EMBED_FN = get_embedding_function()
+    return _EMBED_FN
 
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
@@ -56,10 +66,12 @@ def get_collection(
     create: bool = True,
 ):
     """Get the palace collection through the backend layer."""
+    palace = PalaceRef(id=palace_path, local_path=palace_path)
     return _DEFAULT_BACKEND.get_collection(
-        palace_path,
+        palace=palace,
         collection_name=collection_name,
         create=create,
+        options={"embed_fn": _get_embed_fn()},
     )
 
 

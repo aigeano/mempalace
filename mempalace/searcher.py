@@ -560,28 +560,15 @@ def search_memories(
 
     Args:
         query: Natural language search query.
-        palace_path: Path to the ChromaDB palace directory.
+        palace_path: Path to the palace directory.
         wing: Optional wing filter.
         room: Optional room filter.
         n_results: Max results to return.
-        max_distance: Max cosine distance threshold. The palace collection uses
-            cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
-            Results with distance > this value are filtered out. A value of
-            0.0 disables filtering. Typical useful range: 0.3–1.0.
-        vector_disabled: When True, route to the sqlite-only BM25 fallback
-            (#1222). Set by the MCP server when the HNSW capacity probe
-            detects a divergence that would segfault chromadb on segment
-            load.
+        max_distance: Max cosine distance threshold. Cosine distance is in
+            [0, 2] (0 = identical, 2 = opposite). Results with distance >
+            this value are filtered out. A value of 0.0 disables filtering.
+        vector_disabled: Deprecated, ignored. Kept for backward compatibility.
     """
-    if vector_disabled:
-        return _bm25_only_via_sqlite(
-            query,
-            palace_path,
-            wing=wing,
-            room=room,
-            n_results=n_results,
-        )
-
     try:
         drawers_col = get_collection(palace_path, create=False)
     except Exception as e:

@@ -186,7 +186,7 @@ class MempalaceConfig:
 
     @property
     def collection_name(self):
-        """ChromaDB collection name."""
+        """Collection name for the storage backend."""
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
 
     @property

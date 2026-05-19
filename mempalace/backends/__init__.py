@@ -29,6 +29,7 @@ from .base import (
     UnsupportedFilterError,
 )
 from .chroma import ChromaBackend, ChromaCollection
+from .sqlite_backend import SqliteBackend, SqliteCollection
 from .registry import (
     available_backends,
     get_backend,
@@ -46,6 +47,8 @@ __all__ = [
     "BaseCollection",
     "ChromaBackend",
     "ChromaCollection",
+    "SqliteBackend",
+    "SqliteCollection",
     "DimensionMismatchError",
     "EmbedderIdentityMismatchError",
     "GetResult",
